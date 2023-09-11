@@ -1,10 +1,93 @@
+import cv2
 import re
 import numpy as np
+import torch
+import json
+import os
 
 from PIL import Image
 from skimage import measure
 from itertools import groupby
+from pathlib import Path
 from datetime import date
+from typing import Any, Dict, Generator, ItemsView, List, Tuple
+
+kernel = {'FILM': [np.ones((7, 7), np.uint8), 2],
+          'BARQUILLA': [np.ones((7, 7), np.uint8), 1],
+          'CARTON': [np.ones((7, 7), np.uint8), 1],
+          'ELEMENTOS_FILIFORMES': [np.ones((1, 1), np.uint8), 2],
+          'CINTA_VIDEO': [np.ones((1, 1), np.uint8), 2]}
+
+
+def mask_to_rle_pytorch(tensor: torch.Tensor) -> List[Dict[str, Any]]:
+    """
+    Encodes masks to an uncompressed RLE, in the format expected by
+    pycoco tools.
+    """
+    # Put in fortran order and flatten h,w
+    b, h, w = tensor.shape
+    tensor = tensor.permute(0, 2, 1).flatten(1)
+
+    # Compute change indices
+    diff = tensor[:, 1:] ^ tensor[:, :-1]
+    change_indices = diff.nonzero()
+
+    # Encode run length
+    out = []
+    for i in range(b):
+        cur_idxs = change_indices[change_indices[:, 0] == i, 1]
+        cur_idxs = torch.cat(
+            [
+                torch.tensor([0], dtype=cur_idxs.dtype, device=cur_idxs.device),
+                cur_idxs + 1,
+                torch.tensor([h * w], dtype=cur_idxs.dtype, device=cur_idxs.device),
+            ]
+        )
+        btw_idxs = cur_idxs[1:] - cur_idxs[:-1]
+        counts = [] if tensor[i, 0] == 0 else [0]
+        counts.extend(btw_idxs.detach().cpu().tolist())
+        out.append({"size": [h, w], "counts": counts})
+    return out
+
+
+def rle_to_mask(rle: Dict[str, Any]) -> np.ndarray:
+    """Compute a binary mask from an uncompressed RLE."""
+    h, w = rle["size"]
+    mask = np.empty(h * w, dtype=bool)
+    idx = 0
+    parity = False
+    for count in rle["counts"]:
+        mask[idx : idx + count] = parity
+        idx += count
+        parity ^= True
+    mask = mask.reshape(w, h)
+    return mask.transpose()  # Put in C order
+
+
+def remove_small_regions(mask, label):
+    k = kernel[label][0]
+    iter = kernel[label][1]
+
+    clean_noise = cv2.erode(mask, k, iterations=iter)
+    dilation = cv2.dilate(clean_noise, k, iterations=2*iter)
+    # final_correction = cv2.erode(dilation, kernel, iterations=iter)
+    return dilation
+
+
+def process_mask(d_mask, save = True):
+    mask = cv2.imread(d_mask, 0)
+    label_ann = re.search('_L(.*)_N', d_mask).group(1)
+
+    mask_processed = remove_small_regions(mask, label_ann)
+    if save:
+        folder_file, name_file = os.path.split(d_mask)
+        dir_mask_processed = folder_file.replace('Masks', 'Masks_processed')
+        if not os.path.exists(dir_mask_processed):
+            os.makedirs(dir_mask_processed)
+
+        final_file_path = dir_mask_processed + '/' + name_file
+        cv2.imwrite(final_file_path, mask_processed)
+    return mask_processed
 
 
 def get_mask_from_images(name_images, all_name_masks):
@@ -24,13 +107,42 @@ def get_mask_from_images(name_images, all_name_masks):
     return name_mask_of_images
 
 
-def get_image_from_masks(name_masks, all_name_images):
-    name_image_wo_ext = [f.split('.')[0] for f in all_name_images]
-    id_image_in_masks = [re.search('Img_(.*)_L', f).group(1) for f in name_masks]
+def get_image_from_masks_no_filter(dir_masks, all_dir_images):
+    mask_files = [os.path.split(d)[1] for d in dir_masks]
+    img_files = [os.path.split(d)[1] for d in all_dir_images]
 
-    idx_name_image_with_labeling = [i for i,f in enumerate(name_image_wo_ext) if f in id_image_in_masks]
-    name_image_with_labeling = [f for i,f in enumerate(all_name_images) if i in idx_name_image_with_labeling]
-    return name_image_with_labeling
+    name_image_wo_ext = [f.split('.')[0] for f in img_files]
+    id_image_in_masks = [re.search('Img_(.*)_L', f).group(1) for f in mask_files]
+
+    info_image_to_label = [(f, name_image_wo_ext[i]) for i,f in enumerate(all_dir_images) if name_image_wo_ext[i] in id_image_in_masks]
+    return info_image_to_label
+
+
+def get_image_from_masks(dir_masks, all_dir_images):
+    mask_files = [os.path.split(d)[1] for d in dir_masks]
+    # img_files = [os.path.split(d)[1] for d in all_dir_images]
+    # name_image_wo_ext = [f.split('.')[0] for f in img_files]
+
+    name_image_wo_ext = [f.stem for f in all_dir_images]
+    id_image_in_masks = [re.search('Img_(.*)_L', f).group(1) for f in mask_files]
+    keys_in_common = list(set(name_image_wo_ext) & set(id_image_in_masks)) # images belonging to both sets
+
+    info_image_to_label = [(f, name_image_wo_ext[i]) for i,f in enumerate(all_dir_images) if name_image_wo_ext[i] in keys_in_common]
+    dir_masks_in_common = [d_mask for i, d_mask in enumerate(dir_masks) if id_image_in_masks[i] in keys_in_common]
+    return info_image_to_label, dir_masks_in_common
+
+
+def get_common_data_by_keys(keys, list_dir_masks, list_dir_images, key_images):
+    mask_files = [os.path.split(d)[1] for d in list_dir_masks]
+    key_masks = [re.search('Img_(.*)_L', f).group(1) for f in mask_files]
+
+    keys_in_common = list(set(key_masks) & set(keys)) # keys belonging to both sets
+
+    assert len(list_dir_images) == len(key_images) and len(list_dir_masks) == len(key_masks)
+
+    info_image_to_label = [(str(f), key_images[i]) for i,f in enumerate(list_dir_images) if key_images[i] in keys_in_common]
+    dir_masks = [str(d_mask) for i, d_mask in enumerate(list_dir_masks) if key_masks[i] in keys_in_common]
+    return info_image_to_label, dir_masks
 
 
 def resize_binary_mask(array, new_size):
@@ -39,13 +151,14 @@ def resize_binary_mask(array, new_size):
     return np.asarray(image).astype(np.bool_)
 
 
-def binary_mask_to_rle(binary_mask):
-    rle = {'counts': [], 'size': list(binary_mask.shape)}
-    counts = rle.get('counts')
-    for i, (value, elements) in enumerate(groupby(binary_mask.ravel(order='F'))):
-        if i == 0 and value == 1:
-            counts.append(0)
-        counts.append(len(list(elements)))
+# def binary_mask_to_rle(binary_mask):
+#     rle = {'counts': [], 'size': list(binary_mask.shape)}
+#     counts = rle.get('counts')
+#     for i, (value, elements) in enumerate(groupby(binary_mask.ravel(order='F'))):
+#         if i == 0 and value == 1:
+#             counts.append(0)
+#         counts.append(len(list(elements)))
+#     return rle
 
 
 def close_contour(contour):
@@ -75,21 +188,17 @@ def binary_mask_to_polygon(binary_mask, tolerance=0):
             continue
         contour = np.flip(contour, axis=1)
         segmentation = contour.ravel().tolist()
-        segmentation = [0 if i < 0 else i for i in segmentation]
+        segmentation = [0 if i < 0 else int(i) for i in segmentation]
 
         polygons.append(contour)
         segmentations.append(segmentation)
-        length.append(len(contour))
-    idx = length.index(max(length))
-
-    polygon = polygons[idx]
-    polygon = np.array(polygon, np.int32)
-    segmentation = segmentations[idx]
-    segmentation = np.array(segmentation, np.int32)
-    return polygon, segmentation
+    polygons = [np.array(p, np.int32) for p in polygons]
+    return polygons, segmentations
 
 
 def binary_mask_to_bbox(binary_mask):
+    binary_mask = np.asarray(binary_mask, dtype=np.uint8)
+
     segmentation = np.where(binary_mask == 255)
     xmin = int(np.min(segmentation[1]))
     xmax = int(np.max(segmentation[1]))

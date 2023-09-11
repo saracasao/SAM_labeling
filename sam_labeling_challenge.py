@@ -3,6 +3,7 @@ import cv2
 import copy
 import numpy as np
 import json
+import re
 from pathlib import Path
 from segment_anything import SamPredictor, sam_model_registry
 from utils import remove_small_regions, binary_mask_to_bbox
@@ -23,6 +24,7 @@ Different tools:
 -> if you make a mistake during the labeling you can start the image again pressing C 
 """
 
+n_annotation = 0
 
 # Configuration
 mask_selector_size = False
@@ -32,7 +34,8 @@ mask_selector_score = True
 mode = None
 clicks = list()
 label_clicks = list()
-signal = False
+
+signal, mask_ok = False, False
 n_clicks = 0
 current_mouse_coordinates = list()
 
@@ -40,25 +43,12 @@ current_mouse_coordinates = list()
 width_label, height_label = 10, 10
 
 # CHANGE PATH HERE
-path_images = '/home/scasao/Documents/TEST_DATA'
-
-rgb_dict = {1: (0,255,0),
-            2: (255,0,0),
-            3: (0,0,255),
-            4: (0,73,73),  #x
-            7: (173,255,47),  # x
-            8: (255,109,182),  # x
-            5: (0, 146, 146),  #x
-            11: (73, 0, 146), #x
-            12: (182,109,255), #x
-            13: (219,109, 0),
-            10: (255, 182, 219),  # x
-            6: (162, 205, 90),  #x
-            14: (409,182,255) #x
-            }
-
+# path_images = '/home/scasao/SEPARA/unizar_DL4HSI/separa/'
+path_images = '/home/scasao/SEPARA/unizar_DL4HSI/separa/data/disk/2023-06-09/'
 
 # TODO DEFINE CONFIG TO SELECT: 1. THE TYPE OF LABELING METHOD (POINTS/BBOXES), 2. SELECTION OF MASK BY SIZE OR CONFIDENCE, 3. IMAGE PATH TO LOAD AND PATH TO SAVE MASKS, 4. FORMAT OF LABELS
+
+
 
 def draw_init_stickers(img, height, width, scale_stickers_height, scale_stickers_width):
     dims_ref_text = 2048
@@ -120,6 +110,7 @@ def draw_set_label_stickers(img, height, width, scale_stickers_height, scale_sti
 def mouse_callback(event, x, y, flags, param):
     global mode
     global signal
+    global mask_ok
     global clicks
     global label_clicks
     global n_clicks
@@ -127,18 +118,24 @@ def mouse_callback(event, x, y, flags, param):
 
     if mode == 'points':
         #middle-bottom-click event value is 2
-        if event == cv2.EVENT_MBUTTONDOWN:
+        if event == cv2.EVENT_RBUTTONDOWN:
             #store the coordinates of the right-click event
-            clicks.append([x, y])
-            label_clicks.append(0)
-            cv2.circle(img_to_show, (x, y), 5, (0, 0, 255), -1)
+            # clicks.append([x, y])
+            # label_clicks.append(0)
+            # cv2.circle(img_to_show, (x, y), 5, (0, 0, 255), -1)
+            mask_ok = True
             signal = True
         #this just verifies that the mouse data is being collected
         #you probably want to remove this later
+        if event == cv2.EVENT_MBUTTONDOWN:
+            clicks.append([x, y])
+            label_clicks.append(0)
+            cv2.circle(img_to_show, (x, y), 5, (0, 255, 0), -1)
+            signal = True
         if event == cv2.EVENT_LBUTTONDOWN:
             clicks.append([x, y])
             label_clicks.append(1)
-            cv2.circle(image, (x, y), 5, (0, 255, 0), -1)
+            cv2.circle(img_to_show, (x, y), 5, (0, 255, 0), -1)
             signal = True
     elif mode == 'bboxes':
         #this just verifies that the mouse data is being collected
@@ -239,6 +236,23 @@ def get_mask_img(mask, random_color=True):
     return mask_image_3channels
 
 
+def clean_already_annotated(dir, all_name_files):
+    try:
+        # masks_path = dir + '/Masks_Bilbao'
+        masks_path = '/home/scasao/SEPARA/unizar_DL4HSI/separa/data/Masks_Bilbao/' # TODO PATH
+
+        name_files = os.listdir(masks_path)
+        masks_id = [re.search('Img_(.*)_L', n_mask).group(1) for n_mask in name_files]
+        image_id = [re.search('DALSA/(.*).jpg', n_img).group(1) for n_img in all_name_files]
+
+        image_to_label = list(set(image_id) ^ set(masks_id))
+
+        name_image_to_label = [all_name_files[i] for i, name in enumerate(image_id) if name in image_to_label]
+    except:
+        name_image_to_label = all_name_files
+    return name_image_to_label
+
+
 def get_mask_name(mask_name):
     if '/' in mask_name:
         mask_name = mask_name.split('/')[-1]
@@ -249,36 +263,46 @@ def get_mask_name(mask_name):
 
 
 def save_labeling_process(masks, labels, img_name, dir):
-    masks_path = dir + '/data/Masks_Bilbao/2023-06-09/'
-    img_name = get_mask_name(img_name)
-
-    if img_name[9:11] == '11':
-        masks_path = masks_path + '/9'
-    else:
-        masks_path = masks_path + '/2'
+    global n_annotation
+    subfolder = img_name.split('/')[-2]
+    # masks_path = dir + '/Masks_Bilbao'
+    masks_path = '/home/scasao/SEPARA/unizar_DL4HSI/separa/data/Masks_Bilbao' # TODO PATH
     if not os.path.exists(masks_path):
         os.makedirs(masks_path)
 
+    img_name = get_mask_name(img_name)
     for i, mask in enumerate(masks):
         label = labels[i]
 
         label_str = str(label)
         label_str = label_str.zfill(4)
 
-        str_idx_mask = str(i)
+        str_idx_mask = str(n_annotation)
         str_idx_mask = str_idx_mask.zfill(4)
 
+        # img_name = img_name.split('.')[0]
         name_file = 'Img_' + img_name + '_L' + label_str + '_N' + str_idx_mask
         final_path = masks_path + '/' + name_file + '.png'
         cv2.imwrite(final_path, mask)
+        n_annotation += 1
+
+        print('Masks labeled as {} save in {}'. format(list_of_labels, final_path))
 
 
 def save_labeling_process_bbox_as_ref(masks, labels, img_name, dir, annotations_ref):
-    masks_path = dir + '/data/Masks_Bilbao/2023-06-09/'
-    if not os.path.exists(masks_path):
-        os.makedirs(masks_path)
+    dir_mask = dir.split('/')
+    img_name = dir_mask[-1]
 
-    img_name = get_mask_name(img_name)
+    dir_mask.pop(-1)
+    dir_mask.remove('disk')
+
+    dir_mask.insert(7, 'Masks_SAM_points')
+    dir_mask = os.path.join(*dir_mask)
+    dir_mask = '/' + dir_mask
+    if not os.path.exists(dir_mask):
+        os.makedirs(dir_mask)
+
+    mask_file_ref = get_mask_name(img_name)
     for i, mask in enumerate(masks):
         id_ann = None
         ann = annotations_ref[img_name]
@@ -291,7 +315,7 @@ def save_labeling_process_bbox_as_ref(masks, labels, img_name, dir, annotations_
                 bbox_annotation = ann[j]['bbox']
                 mask_inside = bbox_annotation[0] < middle_point[0] < bbox_annotation[0] + bbox_annotation[2] and bbox_annotation[1] < middle_point[1] < bbox_annotation[1] + bbox_annotation[3]
                 if mask_inside:
-                    id_ann = bbox_annotation[j]['id_annotation']
+                    id_ann = a['id_annotation']
                     break
 
         assert id_ann is not None
@@ -304,15 +328,17 @@ def save_labeling_process_bbox_as_ref(masks, labels, img_name, dir, annotations_
         str_idx_mask = str(i)
         str_idx_mask = str_idx_mask.zfill(4)
 
-        name_file = 'Img_' + img_name + '_L' + label_str + '_N' + str_idx_mask + '_ID' + str(id_ann)
-        final_path = masks_path + '/' + name_file + '.png'
+        mask_file_name = 'Img_' + mask_file_ref + '_L' + label_str + '_N' + str_idx_mask + '_ID' + str(id_ann)
+        final_path = dir_mask + '/' + mask_file_name + '.png'
         cv2.imwrite(final_path, mask)
+        print('Masks labeled as {} save '. format(list_of_labels))
 
 
 def keep_mask(list_of_masks, mask_to_save):
-    gray = cv2.cvtColor(mask_to_save, cv2.COLOR_BGR2GRAY)
-    _, thresh1 = cv2.threshold(gray, 5, 255, cv2.THRESH_BINARY)
-    list_of_masks.append(thresh1)
+    if mask_to_save is not None:
+        gray = cv2.cvtColor(mask_to_save, cv2.COLOR_BGR2GRAY)
+        _, thresh1 = cv2.threshold(gray, 5, 255, cv2.THRESH_BINARY)
+        list_of_masks.append(thresh1)
     return list_of_masks
 
 
@@ -337,10 +363,16 @@ def check_coord(bbox_coord):
         new_ymin = ymin
     return np.array([new_xmin, new_ymin, new_xmax, new_ymax])
 
-image_names = list(Path(path_images).rglob("*.jpg"))
 
-# image_names = [f for f in sorted(os.listdir(path_images)) if ('.jpg' in f or '.png' in f)] # all images are in a single folder
-print(len(image_names))
+# LOAD IMAGES TO LABEL -> DIFFERENT FOR EACH DATASET
+# image_names = load_path_images('/home/scasao/SEPARA/unizar_DL4HSI/separa/data/Masks_init/labeling_failures.txt')
+# annotations_ref = load_files_annotations('/home/scasao/SEPARA/unizar_DL4HSI/separa/data/only_bboxes_labeled_all_annotations.json')
+
+image_names = list(Path(path_images).rglob("*.jpg")) # TODO PATH
+image_names = [str(d) for d in image_names]
+
+image_names = clean_already_annotated(path_images, image_names)
+
 device = "cuda"
 model_type = "vit_h"
 sam_checkpoint = "/home/scasao/SAM/segment-anything/checkpoints/sam_vit_h_4b8939.pth"
@@ -357,12 +389,13 @@ print('HI! Which mode do you want for labeling? (points/bboxes)')
 mode = str(input())
 assert mode == 'points' or mode == 'bboxes', "Mode introduced does not exist"
 
-# LOAD IMAGES TO LABEL -> DIFFERENT FOR EACH DATASET
 for name_img in image_names:
+    print(name_img)
     if '.npy' in name_img:
         image = np.load(path_images + '/' + name_img)
     else:
-        image = cv2.imread(path_images + '/' + name_img)
+        # image = cv2.imread(path_images + '/' + name_img)
+        image = cv2.imread(name_img)
     height, width, _ = image.shape
 
     # DRAW LABELS OF REFERENCE
@@ -385,8 +418,9 @@ for name_img in image_names:
     list_of_masks_image, list_of_mask_showed, list_of_labels, list_of_bboxes = [], [], [], []
     while True:
         save_process = True
+        mask_ok = False
+
         # final_image = cv2.hconcat([img_to_show, ref_image])
-        # cv2.imshow('REFERENCE ANNOTATIONS', ref_image)
         cv2.imshow(window_name, img_to_show)
         k = cv2.waitKey(1) & 0xFF
         if k == 27:
@@ -396,6 +430,10 @@ for name_img in image_names:
             print('Label of the next mask?')
             label = int(input())
         elif k == ord('c'):
+            clicks = list()
+            label_clicks = list()
+            current_mouse_coordinates = list()
+
             list_of_masks_image, list_of_mask_showed, list_of_labels, list_of_bboxes = [], [], [], []
             img_to_show = copy.deepcopy(raw_image)
             save_process = False
@@ -407,7 +445,7 @@ for name_img in image_names:
             img_to_draw = copy.deepcopy(raw_image)
             img_to_show = drawing_bboxes_over_time(img_to_draw, label)
 
-        if signal:
+        if signal and not mask_ok:
             clicks_arr = np.array(clicks)
             label_clicks_arr = np.array(label_clicks)
 
@@ -449,7 +487,9 @@ for name_img in image_names:
             selected_mask = masks[idx_mask_selected]
 
             mask_overlap = get_mask_img(selected_mask)
-            img_to_show = cv2.addWeighted(img_to_show, 1, mask_overlap, 0.9, 1)
+            img_to_show = cv2.addWeighted(raw_image, 1, mask_overlap, 0.9, 1)
+
+        elif signal and mask_ok:
             list_of_masks_image = keep_mask(list_of_masks_image, mask_overlap)
 
             list_of_mask_showed.append(mask_overlap)
@@ -459,21 +499,17 @@ for name_img in image_names:
             clicks = list()
             label_clicks = list()
             current_mouse_coordinates = list()
+            save_labeling_process(list_of_masks_image, list_of_labels, name_img, path_images)
+            # save_labeling_process_bbox_as_ref(list_of_masks_image, list_of_labels, name_img, path_images,
+            #                                   annotations_ref)
 
-            # Draw process
-            if mode == 'bboxes':
-                img_to_show = draw_labeling_process_bboxes(img_to_show, list_of_mask_showed, list_of_bboxes, list_of_labels)
-            elif mode == 'points':
-                img_to_show = draw_labeling_process_points(img_to_show, list_of_masks_image[-1], label)
-        signal = False
+            list_of_masks_image, list_of_mask_showed, list_of_labels, list_of_bboxes = [], [], [], []
+            img_to_show = copy.deepcopy(raw_image)
 
-    if len(list_of_masks_image) > 0 and save_process:
-        # New image without labels
-        save_labeling_process(list_of_masks_image, list_of_labels, name_img, path_images)
+        signal, mask_ok = False, False
 
     if k == 27:
         break
-    print('Number of masks labeled', len(list_of_masks_image))
-    print('Labels assgined', list_of_labels)
+
     cv2.destroyAllWindows()
 
