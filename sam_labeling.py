@@ -2,11 +2,9 @@ import os
 import cv2
 import copy
 import numpy as np
-import json
-from pathlib import Path
+from color_list import rgb_dict
 from segment_anything import SamPredictor, sam_model_registry
 from utils import remove_small_regions, binary_mask_to_bbox
-from manager_separa_dataset import load_path_images, load_files_annotations, draw_ref_annotations
 
 """
 Tool for labeling with SAM. 
@@ -37,25 +35,11 @@ n_clicks = 0
 current_mouse_coordinates = list()
 
 # Drawing variables
-width_label, height_label = 10, 10
+text_color_sticker = (0, 0, 0)
+rectangle_color_sticker = (127, 127, 127)
 
-# CHANGE PATH HERE
-path_images = '/home/scasao/Documents/TEST_DATA'
-
-rgb_dict = {1: (0,255,0),
-            2: (255,0,0),
-            3: (0,0,255),
-            4: (0,73,73),  #x
-            7: (173,255,47),  # x
-            8: (255,109,182),  # x
-            5: (0, 146, 146),  #x
-            11: (73, 0, 146), #x
-            12: (182,109,255), #x
-            13: (219,109, 0),
-            10: (255, 182, 219),  # x
-            6: (162, 205, 90),  #x
-            14: (409,182,255) #x
-            }
+width_label, height_label = 30, 30
+scale_stickers_height, scale_stickers_width = 0.05, 0.4
 
 
 # TODO DEFINE CONFIG TO SELECT: 1. THE TYPE OF LABELING METHOD (POINTS/BBOXES), 2. SELECTION OF MASK BY SIZE OR CONFIDENCE, 3. IMAGE PATH TO LOAD AND PATH TO SAVE MASKS, 4. FORMAT OF LABELS
@@ -170,10 +154,10 @@ def draw_labeling_process_points(img, mask, label):
     bbox_label = [x_max, y_min_label, x_max + width_label, y_min_label + height_label]
     cv2.rectangle(img, (bbox_label[0], bbox_label[1] - 10), (bbox_label[2],bbox_label[3]), color, -1)
     cv2.rectangle(img, (bbox_label[0], bbox_label[1] - 10), (bbox_label[2], bbox_label[3]), (0, 0, 0), 1)
-    # cv2.putText(img, str(label), (bbox_label[0] + 5, bbox_label[1] + int(height_label / 2)), cv2.FONT_HERSHEY_SIMPLEX, 1,
-    #             (0, 0, 0), 2)
-    cv2.putText(img, str(label), (bbox_label[0], bbox_label[1] + int(height_label / 2)), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                (0, 0, 0), 1)
+    cv2.putText(img, str(label), (bbox_label[0] + 5, bbox_label[1] + int(height_label / 2)), cv2.FONT_HERSHEY_SIMPLEX, 1,
+                (0, 0, 0), 2)
+    # cv2.putText(img, str(label), (bbox_label[0], bbox_label[1] + int(height_label / 2)), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+    #             (0, 0, 0), 1)
     return img
 
 
@@ -188,8 +172,8 @@ def draw_current_info(img, xmin, ymin, xmax, ymax, label):
     bbox_label = [xmax, y_min_label, xmax + width_label, y_min_label + height_label]
     cv2.rectangle(img, (bbox_label[0], bbox_label[1] - 10), (bbox_label[2],bbox_label[3]), color, -1)
     cv2.rectangle(img, (bbox_label[0], bbox_label[1] - 10), (bbox_label[2], bbox_label[3]), (0, 0, 0), 1)
-    cv2.putText(img, str(label), (bbox_label[0], bbox_label[1] + int(height_label / 2)), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                (0, 0, 0), 1)
+    cv2.putText(img, str(label), (bbox_label[0], bbox_label[1] + int(height_label / 2)), cv2.FONT_HERSHEY_SIMPLEX, 1,
+                (0, 0, 0), 2)
     return img
 
 
@@ -213,7 +197,7 @@ def draw_labeling_process_bboxes(img, masks, bboxes, labels):
         cv2.rectangle(img, (bbox_label[0], bbox_label[1] - 10), (bbox_label[2], bbox_label[3]), color, -1)
         cv2.rectangle(img, (bbox_label[0], bbox_label[1] - 10), (bbox_label[2], bbox_label[3]), (0, 0, 0), 1)
         cv2.putText(img, str(labels[i]), (bbox_label[0], bbox_label[1] + int(height_label / 2)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
     return img
 
 
@@ -235,6 +219,8 @@ def get_mask_img(mask, random_color=True):
     mask_image = mask_image.astype(np.uint8)
     b_mask, g_mask, r_mask, alpha = cv2.split(mask_image)
     mask_image_3channels = cv2.merge((b_mask, g_mask, r_mask))
+
+    # Clean mask to delete the small regions
     # mask_image_3channels = remove_small_regions(mask_image_3channels)
     return mask_image_3channels
 
@@ -249,13 +235,9 @@ def get_mask_name(mask_name):
 
 
 def save_labeling_process(masks, labels, img_name, dir):
-    masks_path = dir + '/data/Masks_Bilbao/2023-06-09/'
+    masks_path = dir + '/Masks/'
     img_name = get_mask_name(img_name)
 
-    if img_name[9:11] == '11':
-        masks_path = masks_path + '/9'
-    else:
-        masks_path = masks_path + '/2'
     if not os.path.exists(masks_path):
         os.makedirs(masks_path)
 
@@ -274,7 +256,7 @@ def save_labeling_process(masks, labels, img_name, dir):
 
 
 def save_labeling_process_bbox_as_ref(masks, labels, img_name, dir, annotations_ref):
-    masks_path = dir + '/data/Masks_Bilbao/2023-06-09/'
+    masks_path = dir + '/Masks/'
     if not os.path.exists(masks_path):
         os.makedirs(masks_path)
 
@@ -337,10 +319,7 @@ def check_coord(bbox_coord):
         new_ymin = ymin
     return np.array([new_xmin, new_ymin, new_xmax, new_ymax])
 
-image_names = list(Path(path_images).rglob("*.jpg"))
 
-# image_names = [f for f in sorted(os.listdir(path_images)) if ('.jpg' in f or '.png' in f)] # all images are in a single folder
-print(len(image_names))
 device = "cuda"
 model_type = "vit_h"
 sam_checkpoint = "/home/scasao/SAM/segment-anything/checkpoints/sam_vit_h_4b8939.pth"
@@ -349,9 +328,11 @@ sam = sam_model_registry[model_type](checkpoint=sam_checkpoint)
 sam.to(device=device)
 predictor = SamPredictor(sam)
 
-scale_stickers_height, scale_stickers_width = 0.05, 0.4
-text_color_sticker = (0, 0, 0)
-rectangle_color_sticker = (127, 127, 127)
+# CHANGE PATH HERE
+path_images = '/home/scasao/Documents/TEST_DATA'
+# image_names = list(Path(path_images).rglob("*.jpg"))
+image_names = [f for f in sorted(os.listdir(path_images)) if ('.jpg' in f or '.png' in f)]  # all images are in a single folder
+print('Number of images for labeling', len(image_names))
 
 print('HI! Which mode do you want for labeling? (points/bboxes)')
 mode = str(input())
@@ -364,10 +345,6 @@ for name_img in image_names:
     else:
         image = cv2.imread(path_images + '/' + name_img)
     height, width, _ = image.shape
-
-    # DRAW LABELS OF REFERENCE
-    # ref_image = copy.deepcopy(image)
-    # ref_image = draw_ref_annotations(ref_image, name_img, annotations_ref)
 
     # API TO SELECT MASK THAT WE WANT
     predictor.set_image(image)
@@ -385,8 +362,7 @@ for name_img in image_names:
     list_of_masks_image, list_of_mask_showed, list_of_labels, list_of_bboxes = [], [], [], []
     while True:
         save_process = True
-        # final_image = cv2.hconcat([img_to_show, ref_image])
-        # cv2.imshow('REFERENCE ANNOTATIONS', ref_image)
+
         cv2.imshow(window_name, img_to_show)
         k = cv2.waitKey(1) & 0xFF
         if k == 27:
@@ -476,4 +452,3 @@ for name_img in image_names:
     print('Number of masks labeled', len(list_of_masks_image))
     print('Labels assgined', list_of_labels)
     cv2.destroyAllWindows()
-
