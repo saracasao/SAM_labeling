@@ -593,6 +593,16 @@ rgb_dict_adhoc = {0: (),
             14: (409,182,255) #x
             }
 
+rgb_dict = {0: (255, 182, 219, 1),
+            1: (409,182,255, 1),
+            2: (162, 205, 90,1),
+            3: (0, 146, 146, 1),
+            4: (0,73,73,1),
+            5: (173,255,47,1),
+            6: (73, 0, 146,1),
+            7: (255,109,182,1)}
+
+
 keys_list = list(col.keys())
 random_keys = random.sample(keys_list, len(keys_list))
-rgb_dict = {i: col[k] for i, k in enumerate(random_keys)}
+rgb_dict_general = {i: col[k] for i, k in enumerate(random_keys)}

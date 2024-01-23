@@ -1,13 +1,14 @@
 import os
 import re
 import cv2
+import copy
 import json
 import numpy as np
 from PIL import Image
 from pathlib import Path
 from datetime import date
 from torchvision import transforms
-from utils import get_common_data_by_keys, get_mask_from_images, binary_mask_to_polygon, binary_mask_to_bbox, get_image_from_masks, mask_to_rle_pytorch, rle_to_mask
+from utils import get_path_file, get_common_data_by_keys, get_mask_from_images, binary_mask_to_polygon, binary_mask_to_bbox, get_image_from_masks, mask_to_rle_pytorch, rle_to_mask
 
 
 class CocoFormatSEPARA:
@@ -29,7 +30,9 @@ class CocoFormatSEPARA:
                               "BARQUILLA": 2,
                               "CARTON": 3,
                               "CINTA_VIDEO": 4,
-                              "ELEMENTOS_FILIFORMES": 5}
+                              "ELEMENTOS_FILIFORMES": 5,
+                              "BOLSA": 6,
+                              "ELECTRONICA": 7}
 
         self.SEPARA_LABELS_COLORS = {0: '#000000',
                                      1: '#daf706',
@@ -50,7 +53,9 @@ class CocoFormatSEPARA:
                            {'id': 2, 'name': 'BARQUILLA'},
                            {'id': 3, 'name': 'CARTON'},
                            {'id': 4, 'name': 'CINTA_VIDEO'},
-                           {'id': 5, 'name': 'ELEMENTOS_FILIFORMES'}]
+                           {'id': 5, 'name': 'ELEMENTOS_FILIFORMES'},
+                           {'id': 6, 'name': 'BOLSA'},
+                           {'id': 7, 'name': 'ELECTRONICA'}]
 
 
         self.categories_e = [{'id': 0, 'name': 'background'}, # background = the rest of the object
@@ -94,7 +99,7 @@ class CocoFormatSEPARA:
         data['info']['version'] = current_date.strftime("%Y/%m/%d/")
         self.images = data['images']
         self.annotations = data['annotations']
-        self.annotation_id = len(self.annotations)
+        self.annotation_id = self.annotations[-1]['id'] + 1
         return data
 
     def get_image_id(self):
@@ -102,7 +107,33 @@ class CocoFormatSEPARA:
         images_id = sorted(images_id)
         return images_id
 
-    def get_files_dir_from_path(self): # TODO FINISH THE CLEANING OF MASK WITHOUTH HYPERSPECTRAL IMAGES ASSOCIATED
+    def get_files_dir_from_path(self):
+        """Load the masks and look for the corresponding images in the global folder of the dataset"""
+        # Get all the new masks
+        dir_masks_png = list(Path(self.dir_masks).rglob("*.png")) # check extension of the masks
+        dir_masks_jpg = list(Path(self.dir_masks).rglob("*.jpg")) # check extension of the masks
+
+        list_dir_masks  = dir_masks_png + dir_masks_jpg
+
+        # Get all the images corresponding to the masks
+        list_dir_images = []
+        for d_mask in list_dir_masks:
+            d_mask_str = str(d_mask)
+            img_id = re.search('Img_(.*)_L', d_mask_str).group(1)
+            subfolder = os.path.join(*d_mask_str.split('/')[-4:-1])
+            dir_image_png = self.dir_data + subfolder + '/' + img_id + '.jpg'
+            assert os.path.isfile(dir_image_png)
+            list_dir_images.append(Path(dir_image_png))
+
+        # Get info images and masks as str
+        info_image_to_label = [(str(f), str(f.stem)) for i, f in enumerate(list_dir_images)]
+        list_dir_masks = list(map(str, list_dir_masks))
+
+        return sorted(info_image_to_label), sorted(list_dir_masks)
+
+    def get_files_dir_from_path_adding_new_files(self):
+        """Add new images to the annotation files and needs to be checked if hyper exists or not.
+           All the image and masks are in a unique subfolder"""
         # Get all the new masks
         dir_masks_png = list(Path(self.dir_masks).rglob("*.png")) # check extension of the masks
         dir_masks_jpg = list(Path(self.dir_masks).rglob("*.jpg")) # check extension of the masks
@@ -170,12 +201,18 @@ class CocoFormatSEPARA:
             # info_images = get_image_from_masks(dir_masks, all_dir_images)
         return info_images, dir_masks
 
-    def create_image_info(self, image_id, file_name, width, height):
+    def create_image_info(self, image_id, file_name, width, height, hyper):
         img_dir_split    = file_name.split('/')
         img_dir_standard = img_dir_split[img_dir_split.index('data'):]
+        img_dir_standard = os.path.join(*img_dir_standard)
+
+        if hyper:
+            extension = Path(img_dir_standard).suffix
+            img_dir_standard = img_dir_standard.replace('DALSA', 'Specim')
+            img_dir_standard = img_dir_standard.replace(extension,'.tiff')
 
         image_info = {"id": image_id,
-                      "file_name": os.path.join(*img_dir_standard),
+                      "file_name": img_dir_standard,
                       "width": width,
                       "height": height,
                       "date_captured": self.info['date_created'],
@@ -187,6 +224,7 @@ class CocoFormatSEPARA:
         # From mask to rle
         mask_tensor = self.convert_tensor(mask)
         segmentation = mask_to_rle_pytorch(mask_tensor)
+        # mask = rle_to_mask(segmentation[0])
 
         bbox = binary_mask_to_bbox(mask)
 
@@ -202,11 +240,44 @@ class CocoFormatSEPARA:
         self.annotation_id += 1
         return annotation_info
 
-    def generate_new_coco_labels(self, format ='rle'):
+    def merge_vhs_segmentations(self, img_id, mask):
+        ann = copy.deepcopy(self.annotations)
+        ann_img = [a for a in ann if a['image_id'] == img_id]
+        ann_vhs = [a for a in ann if a['image_id'] == img_id and a['category_id'] == 4]
+
+        if len(ann_vhs) > 0:
+            merge = True
+            mask_arr = np.array(mask)
+            bool_mask = mask_arr > 200
+            for i, a in enumerate(ann_vhs):
+                current_rle_mask = a['segmentation'][0]
+                current_mask = rle_to_mask(current_rle_mask)
+                bool_mask = np.logical_or(bool_mask, current_mask)
+                self.annotations.remove(a)
+            ref_mask = bool_mask.astype(np.uint8) * 255
+            ref_mask = Image.fromarray(ref_mask)
+            mask_tensor = self.convert_tensor(ref_mask)
+            segmentation = mask_to_rle_pytorch(mask_tensor)
+            bbox = binary_mask_to_bbox(mask)
+
+            new_annotation_info = {'id': self.annotation_id,
+                                   'image_id': img_id,
+                                   'category_id': 4,
+                                   'segmentation': segmentation,
+                                   'bbox': bbox}
+            self.annotations.append(new_annotation_info)
+            self.annotation_id += 1
+        else:
+            merge = False
+        return merge
+
+    def generate_new_coco_labels(self, merge_vhs=False, hyper=False):
         info_images, dir_masks = self.get_name_files_masks_as_ref()
         dir_images, name_images_wo_ext = zip(*info_images)
 
-        for d_mask in dir_masks:
+        for i, d_mask in enumerate(dir_masks):
+            print(i)
+            label  = re.search('_L(.*)_N', d_mask).group(1)
             img_id = re.search('Img_(.*)_L', d_mask).group(1)
             idx_name_image = name_images_wo_ext.index(img_id)
             dir_img = dir_images[idx_name_image]
@@ -214,10 +285,19 @@ class CocoFormatSEPARA:
             mask = Image.open(d_mask)
             images_id = self.get_image_id()
             if img_id not in images_id:
-                image_info = self.create_image_info(img_id, dir_img, mask.size[0], mask.size[1])
+                image_info = self.create_image_info(img_id, dir_img, mask.size[0], mask.size[1], hyper)
                 self.images.append(image_info)
-            annotation_info = self.create_annotation_info(mask, d_mask, img_id)
-            self.annotations.append(annotation_info)
+
+                annotation_info = self.create_annotation_info(mask, d_mask, img_id)
+                self.annotations.append(annotation_info)
+            elif merge_vhs and label == 'CINTA_VIDEO' and img_id in images_id:
+                merge = self.merge_vhs_segmentations(img_id, mask)
+                if not merge:
+                    annotation_info = self.create_annotation_info(mask, d_mask, img_id)
+                    self.annotations.append(annotation_info)
+            else:
+                annotation_info = self.create_annotation_info(mask, d_mask, img_id)
+                self.annotations.append(annotation_info)
 
     def set_empty_segm_from_bbox(self, format_seg = 'rle'):
         dir_masks = list(Path(self.dir_masks).rglob("*.png")) # check extension of the masks

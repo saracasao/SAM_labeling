@@ -5,6 +5,7 @@ import torch
 import json
 import os
 
+from color_list import rgb_dict
 from PIL import Image
 from skimage import measure
 from itertools import groupby
@@ -12,11 +13,13 @@ from pathlib import Path
 from datetime import date
 from typing import Any, Dict, Generator, ItemsView, List, Tuple
 
-kernel = {'FILM': [np.ones((7, 7), np.uint8), 2],
+kernel = {'FILM': [np.ones((7, 7), np.uint8), 1],
           'BARQUILLA': [np.ones((7, 7), np.uint8), 1],
           'CARTON': [np.ones((7, 7), np.uint8), 1],
           'ELEMENTOS_FILIFORMES': [np.ones((1, 1), np.uint8), 2],
-          'CINTA_VIDEO': [np.ones((1, 1), np.uint8), 2]}
+          'CINTA_VIDEO': [np.ones((1, 1), np.uint8), 2],
+          'BOLSA': [np.ones((7, 7), np.uint8), 1],
+          'ELECTRONICA': [np.ones((7, 7), np.uint8), 1]}
 
 
 def mask_to_rle_pytorch(tensor: torch.Tensor) -> List[Dict[str, Any]]:
@@ -30,7 +33,7 @@ def mask_to_rle_pytorch(tensor: torch.Tensor) -> List[Dict[str, Any]]:
 
     # Compute change indices
     diff = tensor[:, 1:] ^ tensor[:, :-1]
-    change_indices = diff.nonzero()
+    change_indices = torch.nonzero(diff)
 
     # Encode run length
     out = []
@@ -52,6 +55,7 @@ def mask_to_rle_pytorch(tensor: torch.Tensor) -> List[Dict[str, Any]]:
 
 def rle_to_mask(rle: Dict[str, Any]) -> np.ndarray:
     """Compute a binary mask from an uncompressed RLE."""
+    assert type(rle) == dict, "Error in rle type {}".format(rle)
     h, w = rle["size"]
     mask = np.empty(h * w, dtype=bool)
     idx = 0
@@ -69,7 +73,7 @@ def remove_small_regions(mask, label):
     iter = kernel[label][1]
 
     clean_noise = cv2.erode(mask, k, iterations=iter)
-    dilation = cv2.dilate(clean_noise, k, iterations=2*iter)
+    dilation = cv2.dilate(clean_noise, k, iterations=(2*iter))
     # final_correction = cv2.erode(dilation, kernel, iterations=iter)
     return dilation
 
@@ -209,3 +213,107 @@ def binary_mask_to_bbox(binary_mask):
     height = ymax - ymin
 
     return xmin, ymin, width, height
+
+
+def get_existing_masks(name_img, annotations, labels_included =False):
+    name = str(Path(name_img).stem)
+    ann_img = annotations[name]
+
+    masks, labels = [], []
+    for a in ann_img:
+        if labels_included:
+            rle = a[0]
+            label = a[1]
+            if len(rle) > 0 and len(rle[0]) > 0:
+                mask = rle_to_mask(rle[0])
+                masks.append(np.array(mask))
+                labels.append(label)
+        elif len(a) > 0 and len(a[0]) > 0:
+            mask = rle_to_mask(a[0])
+            masks.append(np.array(mask))
+
+    if not labels_included and len(masks) > 1:
+        size_mask = np.shape(masks[0])
+        ref_mask = False*np.ones(size_mask)
+        for mask in masks:
+            ref_mask = np.logical_or(ref_mask, mask)
+        masks = ref_mask
+    elif not labels_included and len(masks) == 1:
+        masks = masks[0]
+    elif len(masks) == 0:
+        masks = None
+
+    if not labels_included:
+        return masks
+    else:
+        return masks, labels
+
+
+def get_mask_img(mask, color_label):
+    color = np.array(color_label)
+    h, w = mask.shape[-2:]
+    mask_image = mask.reshape(h, w, 1) * color.reshape(1, 1, -1)
+    mask_image *= 255
+    mask_image = mask_image.astype(np.uint8)
+    b_mask, g_mask, r_mask, alpha = cv2.split(mask_image)
+    mask_image_3channels = cv2.merge((b_mask, g_mask, r_mask))
+    return mask_image_3channels
+
+
+def get_multiple_mask_img(masks):
+    labels = []
+    h, w = masks[0][0].shape[-2:]
+    final_mask = np.zeros((h, w, 3)).astype(np.uint8)
+    for bool_mask, l in zip(*masks):
+        color = np.array(rgb_dict[l])
+        labels.append(l)
+        h, w = bool_mask.shape[-2:]
+        mask_image = bool_mask.reshape(h, w, 1) * color.reshape(1, 1, -1)
+        mask_image *= 255
+        mask_image = mask_image.astype(np.uint8)
+        b_mask, g_mask, r_mask, alpha = cv2.split(mask_image)
+        mask_image_3channels = cv2.merge((b_mask, g_mask, r_mask))
+        final_mask = cv2.bitwise_or(final_mask, mask_image_3channels)
+    return final_mask, labels
+
+
+def get_path_file(path, name):
+    file_path = None
+    for root, subdirs, files in os.walk(path):
+        if name in files:
+           file_path = os.path.join(root, name)
+    return file_path
+
+
+def load_txt(path_file):
+    with open(path_file) as f:
+        lines = [line.rstrip() for line in f]
+    return lines
+
+
+def get_annotations(annotations,name_images):
+    ann = {name_img: [] for name_img in name_images}
+
+    ann_image_ids = [ann['image_id'] for ann in annotations]
+    ann_image_ids = np.array(ann_image_ids)
+    for name in name_images:
+        if name in ann_image_ids:
+            idx_ann = np.where(name == ann_image_ids)[0]
+            for idx in idx_ann:
+                img_seg   = annotations[idx]['segmentation']
+                img_label = annotations[idx]['category_id']
+                img_ann   = (img_seg, img_label)
+                ann[name].append(img_ann)
+    return ann
+
+
+def get_colors():
+    rgb_dict = {i: np.concatenate([np.random.random(3), np.array([0.6])], axis=0) for i in list(range(30))}
+    return rgb_dict
+
+
+if __name__ == "__main__":
+    name_file = '20220928_10-51-47.jpg'
+    path = '/home/scasao/SEPARA/unizar_DL4HSI/separa/data/disk/'
+
+    get_path_file(path, name_file)
